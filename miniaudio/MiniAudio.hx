@@ -150,7 +150,7 @@ class MiniAudio
 		#if lime
 		var app:lime.app.Application = lime.app.Application.current;
 		if (app == null) return;
-		app.onUpdate.add(function(_:Int)
+		app.onUpdate.add(function(_)
 		{
 			if (autoUpdate) update();
 		});
