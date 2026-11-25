@@ -1,0 +1,4 @@
+-cp ./
+-lib miniaudio
+-main Main
+-cpp bin

@@ -1,0 +1,12 @@
+{
+	"name": "miniaudio",
+	"url": "https://github.com/BrenninhoTools/miniaudio",
+	"license": "MIT",
+	"tags": ["audio", "miniaudio", "cpp", "sound", "mobile", "native"],
+	"description": "Haxe/C++ bindings for miniaudio with sound groups, fades, delayed playback, loop points, metering and focus handling.",
+	"version": "1.0.0",
+	"releasenote": "First release, moved out of Funkin' Psych.",
+	"classPath": "",
+	"contributors": ["Brenninho"],
+	"dependencies": {}
+}

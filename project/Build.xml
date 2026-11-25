@@ -1,0 +1,31 @@
+<xml>
+	<pragma once="true"/>
+
+	<files id="hxminiaudio" dir="${this_dir}">
+		<compilerflag value="-I${this_dir}/include"/>
+		<compilerflag value="/bigobj" if="windows" unless="mingw"/>
+		<compilerflag value="-x" if="iphone"/>
+		<compilerflag value="objective-c++" if="iphone"/>
+		<depend name="${this_dir}/include/miniaudio.h"/>
+		<depend name="${this_dir}/include/hxminiaudio.h"/>
+		<file name="src/hxminiaudio.cpp" unless="iphone"/>
+		<file name="src/hxminiaudio.mm" if="iphone"/>
+	</files>
+
+	<files id="haxe">
+		<compilerflag value="-I${this_dir}/include"/>
+	</files>
+
+	<target id="haxe">
+		<files id="hxminiaudio"/>
+		<lib name="-ldl" if="linux"/>
+		<lib name="-lpthread" if="linux"/>
+		<lib name="-lm" if="linux"/>
+		<lib name="-ldl" if="android"/>
+		<lib name="-lOpenSLES" if="android"/>
+		<vflag name="-framework" value="CoreFoundation" if="macos || iphone"/>
+		<vflag name="-framework" value="CoreAudio" if="macos"/>
+		<vflag name="-framework" value="AudioToolbox" if="macos || iphone"/>
+		<vflag name="-framework" value="AVFoundation" if="iphone"/>
+	</target>
+</xml>

@@ -1,0 +1,8 @@
+-cp ./
+-D android
+-D HXCPP_ARM64
+-D PLATFORM=android-21
+-D static_link
+-lib miniaudio
+-main Main
+-cpp bin-android
