@@ -11,7 +11,11 @@ Haxe/C++ bindings for [miniaudio](https://miniaud.io) focused on low latency pla
 - Loop points in milliseconds.
 - Peak and RMS meters for every sound and the master output, plus a fast peak scan over raw PCM buffers.
 - Suspends the device when the window loses focus and resumes it when focus comes back (Lime).
-- Playback device and backend names.
+- Playback device and backend names, plus a list of output devices.
+- Decoded sounds: short effects are decoded once into memory, so nothing is decoded on the audio thread while playing.
+- One shots with voice limits: fire and forget copies that share the decoded audio and release themselves when done; the oldest voice is cut when the limit is reached.
+- Effects on every group and on the master output: low pass, high pass, echo and gain, changed live without clicks or locks on the audio thread.
+- Group fades, ducking and `onComplete` callbacks for sounds.
 
 ## Platforms
 
@@ -45,6 +49,27 @@ hit.playDelayed(120);
 
 music.volume = 0.8;
 song.fade(1, 0, 2000);
+```
+
+Hit sounds and other short effects:
+
+```haxe
+var hit:MiniAudioSound = MiniAudioSound.decodedAsset('assets/sounds/hitsound.ogg');
+hit.maxVoices = 6;
+hit.playOneShot(0.8, FlxG.random.float(0.95, 1.05));
+```
+
+Effects:
+
+```haxe
+music.effects.lowPass = 900;
+music.effects.muffle(0.6);
+music.effects.setEcho(180, 0.35, 0.4);
+music.effects.clear();
+MiniAudio.masterEffects.highPass = 60;
+music.duck(0.3, 150);
+music.unduck(400);
+song.onComplete = function() endSong();
 ```
 
 With Lime, `MiniAudio.update()` runs every frame and the device follows the window focus. Set `MiniAudio.autoUpdate` or `MiniAudio.autoSuspend` to `false` to drive them yourself. Without Lime, call `MiniAudio.update()` from your loop.

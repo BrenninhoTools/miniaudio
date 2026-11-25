@@ -4,8 +4,8 @@
 	"license": "MIT",
 	"tags": ["audio", "miniaudio", "cpp", "sound", "mobile", "native"],
 	"description": "Haxe/C++ bindings for miniaudio with sound groups, fades, delayed playback, loop points, metering and focus handling.",
-	"version": "1.0.0",
-	"releasenote": "First release, moved out of Funkin' Psych.",
+	"version": "1.1.0",
+	"releasenote": "Decoded sounds, one shots with voice limits, group and master effects, fades and completion callbacks.",
 	"classPath": "",
 	"contributors": ["Brenninho"],
 	"dependencies": {}

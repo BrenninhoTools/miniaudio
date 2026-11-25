@@ -62,5 +62,21 @@ namespace hxminiaudio
 	int soundSampleRate(int id);
 	int soundChannels(int id);
 
+	int soundLoadMemoryDecoded(const unsigned char* data, int size, int group);
+	int soundPlayOneShot(int id, float volume, float pitch, float pan, int group);
+	void soundSetMaxVoices(int id, int voices);
+	int soundVoices(int id);
+	void soundStopVoices(int id);
+
+	bool effectSetLowPass(int groupId, double cutoff, int order);
+	bool effectSetHighPass(int groupId, double cutoff, int order);
+	bool effectSetEcho(int groupId, double delayMilliseconds, float feedback, float wet);
+	void effectSetGain(int groupId, float gain);
+	void effectClear(int groupId);
+
+	int deviceCount();
+	const char* deviceNameAt(int index);
+	bool deviceIsDefault(int index);
+
 	float bufferPeak(const unsigned char* data, int byteLength, int bitsPerSample, int channels, int startFrame, int frameCount, int channel);
 }

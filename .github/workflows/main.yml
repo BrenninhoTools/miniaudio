@@ -31,6 +31,17 @@ jobs:
       - name: Build Sample
         run: cd sample && haxe build.hxml
 
+  Native:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@main
+
+      - name: Native Test
+        run: |
+          g++ -std=c++17 -O1 -DMA_ENABLE_ONLY_SPECIFIC_BACKENDS -DMA_ENABLE_NULL -Iproject/include project/tests/native_test.cpp project/src/hxminiaudio.cpp -lpthread -ldl -lm -o native_test
+          ./native_test
+
   Android:
     runs-on: ubuntu-latest
     steps:

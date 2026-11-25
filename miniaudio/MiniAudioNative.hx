@@ -59,6 +59,19 @@ extern class MiniAudioNative
 	@:native('::hxminiaudio::soundGetRms') static function soundGetRms(id:Int):cpp.Float32;
 	@:native('::hxminiaudio::soundSampleRate') static function soundSampleRate(id:Int):Int;
 	@:native('::hxminiaudio::soundChannels') static function soundChannels(id:Int):Int;
+	@:native('::hxminiaudio::soundLoadMemoryDecoded') static function soundLoadMemoryDecoded(data:cpp.RawConstPointer<cpp.UInt8>, size:Int, group:Int):Int;
+	@:native('::hxminiaudio::soundPlayOneShot') static function soundPlayOneShot(id:Int, volume:cpp.Float32, pitch:cpp.Float32, pan:cpp.Float32, group:Int):Int;
+	@:native('::hxminiaudio::soundSetMaxVoices') static function soundSetMaxVoices(id:Int, voices:Int):Void;
+	@:native('::hxminiaudio::soundVoices') static function soundVoices(id:Int):Int;
+	@:native('::hxminiaudio::soundStopVoices') static function soundStopVoices(id:Int):Void;
+	@:native('::hxminiaudio::effectSetLowPass') static function effectSetLowPass(group:Int, cutoff:Float, order:Int):Bool;
+	@:native('::hxminiaudio::effectSetHighPass') static function effectSetHighPass(group:Int, cutoff:Float, order:Int):Bool;
+	@:native('::hxminiaudio::effectSetEcho') static function effectSetEcho(group:Int, delayMilliseconds:Float, feedback:cpp.Float32, wet:cpp.Float32):Bool;
+	@:native('::hxminiaudio::effectSetGain') static function effectSetGain(group:Int, gain:cpp.Float32):Void;
+	@:native('::hxminiaudio::effectClear') static function effectClear(group:Int):Void;
+	@:native('::hxminiaudio::deviceCount') static function deviceCount():Int;
+	@:native('::hxminiaudio::deviceNameAt') static function deviceNameAt(index:Int):cpp.ConstCharStar;
+	@:native('::hxminiaudio::deviceIsDefault') static function deviceIsDefault(index:Int):Bool;
 	@:native('::hxminiaudio::bufferPeak') static function bufferPeak(data:cpp.RawConstPointer<cpp.UInt8>, byteLength:Int, bitsPerSample:Int, channels:Int, startFrame:Int, frameCount:Int, channel:Int):cpp.Float32;
 }
 #end

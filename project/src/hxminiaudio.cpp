@@ -56,9 +56,77 @@ namespace
 
 	ma_node_vtable meterVTable = {meterProcess, NULL, 1, 1, 0};
 
+	struct EffectNode
+	{
+		ma_node_base base;
+		std::atomic_flag busy;
+		ma_uint32 channels;
+		ma_uint32 sampleRate;
+		ma_lpf lpf;
+		ma_hpf hpf;
+		bool lpfReady;
+		bool hpfReady;
+		bool lpfOn;
+		bool hpfOn;
+		float* echo;
+		ma_uint32 echoFrames;
+		ma_uint32 echoCursor;
+		float echoFeedback;
+		float echoWet;
+		float gain;
+		bool active;
+	};
+
+	void effectProcess(ma_node* node, const float** framesIn, ma_uint32* frameCountIn, float** framesOut, ma_uint32* frameCountOut)
+	{
+		EffectNode* self = (EffectNode*)node;
+		ma_uint32 count = *frameCountIn < *frameCountOut ? *frameCountIn : *frameCountOut;
+		ma_uint32 channels = self->channels;
+		ma_uint32 samples = count * channels;
+		float* output = framesOut[0];
+		memcpy(output, framesIn[0], samples * sizeof(float));
+		*frameCountIn = count;
+		*frameCountOut = count;
+
+		if (self->busy.test_and_set(std::memory_order_acquire)) return;
+
+		if (self->hpfOn && self->hpfReady) ma_hpf_process_pcm_frames(&self->hpf, output, output, count);
+		if (self->lpfOn && self->lpfReady) ma_lpf_process_pcm_frames(&self->lpf, output, output, count);
+
+		if (self->echo != NULL && self->echoFrames > 0)
+		{
+			float feedback = self->echoFeedback;
+			float wet = self->echoWet;
+			for (ma_uint32 frame = 0; frame < count; frame++)
+			{
+				float* line = self->echo + (size_t)self->echoCursor * channels;
+				float* sample = output + (size_t)frame * channels;
+				for (ma_uint32 c = 0; c < channels; c++)
+				{
+					float delayed = line[c];
+					float input = sample[c];
+					line[c] = input + delayed * feedback;
+					sample[c] = input + delayed * wet;
+				}
+				self->echoCursor++;
+				if (self->echoCursor >= self->echoFrames) self->echoCursor = 0;
+			}
+		}
+
+		if (self->gain != 1.0f)
+			for (ma_uint32 i = 0; i < samples; i++)
+				output[i] *= self->gain;
+
+		self->busy.clear(std::memory_order_release);
+	}
+
+	ma_node_vtable effectVTable = {effectProcess, NULL, 1, 1, 0};
+
 	struct Group
 	{
 		ma_sound_group group;
+		EffectNode effects;
+		bool hasEffects;
 		int generation;
 	};
 
@@ -66,19 +134,32 @@ namespace
 	{
 		ma_sound sound;
 		ma_decoder decoder;
+		ma_audio_buffer_ref bufferRef;
 		MeterNode meter;
 		unsigned char* memory;
 		size_t memorySize;
+		float* pcm;
+		ma_uint64 pcmFrames;
+		ma_uint32 pcmChannels;
 		bool hasDecoder;
+		bool hasBufferRef;
 		bool hasMeter;
+		bool autoRelease;
+		int parent;
+		int maxVoices;
+		unsigned long long order;
 		int generation;
 		int group;
 	};
+
+	unsigned long long playOrder = 0;
 
 	ma_context context;
 	ma_device device;
 	ma_engine engine;
 	MeterNode masterMeter;
+	EffectNode masterEffects;
+	bool masterEffectsActive = false;
 	bool contextActive = false;
 	bool deviceActive = false;
 	bool engineActive = false;
@@ -162,12 +243,75 @@ namespace
 		return makeHandle((int)index, group->generation);
 	}
 
+	ma_node* rootOutput()
+	{
+		if (masterEffectsActive) return (ma_node*)&masterEffects;
+		if (masterMeterActive) return (ma_node*)&masterMeter;
+		return ma_engine_get_endpoint(&engine);
+	}
+
 	ma_node* outputFor(int groupId)
 	{
 		Group* group = findGroup(groupId);
 		if (group != NULL) return (ma_node*)&group->group;
-		if (masterMeterActive) return (ma_node*)&masterMeter;
-		return ma_engine_get_endpoint(&engine);
+		return rootOutput();
+	}
+
+	bool initEffects(EffectNode* effects, ma_node* output)
+	{
+		ma_uint32 channels = ma_engine_get_channels(&engine);
+		ma_node_config config = ma_node_config_init();
+		config.vtable = &effectVTable;
+		config.pInputChannels = &channels;
+		config.pOutputChannels = &channels;
+		effects->busy.clear();
+		effects->channels = channels;
+		effects->sampleRate = ma_engine_get_sample_rate(&engine);
+		effects->lpfReady = false;
+		effects->hpfReady = false;
+		effects->lpfOn = false;
+		effects->hpfOn = false;
+		effects->echo = NULL;
+		effects->echoFrames = 0;
+		effects->echoCursor = 0;
+		effects->echoFeedback = 0.0f;
+		effects->echoWet = 0.0f;
+		effects->gain = 1.0f;
+		effects->active = false;
+		if (ma_node_init(ma_engine_get_node_graph(&engine), &config, NULL, effects) != MA_SUCCESS) return false;
+		ma_node_attach_output_bus(effects, 0, output, 0);
+		effects->active = true;
+		return true;
+	}
+
+	void lockEffects(EffectNode* effects)
+	{
+		while (effects->busy.test_and_set(std::memory_order_acquire)) {}
+	}
+
+	void unlockEffects(EffectNode* effects)
+	{
+		effects->busy.clear(std::memory_order_release);
+	}
+
+	void uninitEffects(EffectNode* effects)
+	{
+		if (!effects->active) return;
+		ma_node_uninit(effects, NULL);
+		if (effects->lpfReady) ma_lpf_uninit(&effects->lpf, NULL);
+		if (effects->hpfReady) ma_hpf_uninit(&effects->hpf, NULL);
+		if (effects->echo != NULL) free(effects->echo);
+		effects->echo = NULL;
+		effects->lpfReady = false;
+		effects->hpfReady = false;
+		effects->active = false;
+	}
+
+	EffectNode* findEffects(int groupId)
+	{
+		if (groupId < 0) return masterEffectsActive ? &masterEffects : NULL;
+		Group* group = findGroup(groupId);
+		return group != NULL && group->hasEffects ? &group->effects : NULL;
 	}
 
 	bool initMeter(MeterNode* meter, ma_node* output)
@@ -184,11 +328,11 @@ namespace
 		return true;
 	}
 
-	void attachSound(Sound* sound, int group)
+	void attachSound(Sound* sound, int group, bool meter = true)
 	{
 		ma_node* output = outputFor(group);
 		sound->group = group;
-		sound->hasMeter = initMeter(&sound->meter, output);
+		sound->hasMeter = meter && initMeter(&sound->meter, output);
 		ma_node_attach_output_bus(&sound->sound, 0, sound->hasMeter ? (ma_node*)&sound->meter : output, 0);
 	}
 
@@ -198,7 +342,9 @@ namespace
 		ma_sound_uninit(&sound->sound);
 		if (sound->hasMeter) ma_node_uninit(&sound->meter, NULL);
 		if (sound->hasDecoder) ma_decoder_uninit(&sound->decoder);
+		if (sound->hasBufferRef) ma_audio_buffer_ref_uninit(&sound->bufferRef);
 		if (sound->memory != NULL) free(sound->memory);
+		if (sound->pcm != NULL && sound->parent < 0) ma_free(sound->pcm, NULL);
 		delete sound;
 	}
 
@@ -207,7 +353,15 @@ namespace
 		Sound* sound = new Sound();
 		sound->memory = NULL;
 		sound->memorySize = 0;
+		sound->pcm = NULL;
+		sound->pcmFrames = 0;
+		sound->pcmChannels = 0;
 		sound->hasDecoder = false;
+		sound->hasBufferRef = false;
+		sound->autoRelease = false;
+		sound->parent = -1;
+		sound->maxVoices = 8;
+		sound->order = 0;
 		sound->hasMeter = false;
 		sound->generation = 0;
 		sound->group = -1;
@@ -318,6 +472,7 @@ namespace
 		}
 
 		masterMeterActive = initMeter(&masterMeter, ma_engine_get_endpoint(&engine));
+		masterEffectsActive = initEffects(&masterEffects, masterMeterActive ? (ma_node*)&masterMeter : ma_engine_get_endpoint(&engine));
 		suspended = false;
 		restartRequested.store(false);
 		return true;
@@ -378,9 +533,12 @@ namespace hxminiaudio
 		{
 			if (groups[i] == NULL) continue;
 			ma_sound_group_uninit(&groups[i]->group);
+			if (groups[i]->hasEffects) uninitEffects(&groups[i]->effects);
 			delete groups[i];
 			groups[i] = NULL;
 		}
+		if (masterEffectsActive) uninitEffects(&masterEffects);
+		masterEffectsActive = false;
 		if (masterMeterActive) ma_node_uninit(&masterMeter, NULL);
 		masterMeterActive = false;
 		ma_engine_uninit(&engine);
@@ -421,9 +579,17 @@ namespace hxminiaudio
 
 	void engineUpdate()
 	{
-		if (!restartRequested.exchange(false)) return;
 		std::lock_guard<std::recursive_mutex> guard(lock);
-		if (!engineActive || suspended) return;
+		if (!engineActive) return;
+		for (size_t i = 0; i < sounds.size(); i++)
+		{
+			Sound* sound = sounds[i];
+			if (sound == NULL || !sound->autoRelease) continue;
+			if (ma_sound_is_playing(&sound->sound) && !ma_sound_at_end(&sound->sound)) continue;
+			sounds[i] = NULL;
+			destroySound(sound);
+		}
+		if (!restartRequested.exchange(false) || suspended) return;
 		ma_device* current = ma_engine_get_device(&engine);
 		if (current != NULL && ma_device_get_state(current) != ma_device_state_started) ma_device_start(current);
 	}
@@ -481,17 +647,21 @@ namespace hxminiaudio
 		if (!engineActive) return -1;
 		Group* group = new Group();
 		group->generation = 0;
+		group->hasEffects = false;
 		Group* parentGroup = findGroup(parent);
 		if (ma_sound_group_init(&engine, 0, parentGroup != NULL ? &parentGroup->group : NULL, &group->group) != MA_SUCCESS)
 		{
 			delete group;
 			return -1;
 		}
-		if (parentGroup == NULL && masterMeterActive) ma_node_attach_output_bus(&group->group, 0, &masterMeter, 0);
+		ma_node* target = parentGroup != NULL ? (ma_node*)&parentGroup->group : rootOutput();
+		group->hasEffects = initEffects(&group->effects, target);
+		ma_node_attach_output_bus(&group->group, 0, group->hasEffects ? (ma_node*)&group->effects : target, 0);
 		int handle = storeGroup(group);
 		if (handle < 0)
 		{
 			ma_sound_group_uninit(&group->group);
+			if (group->hasEffects) uninitEffects(&group->effects);
 			delete group;
 		}
 		return handle;
@@ -502,7 +672,7 @@ namespace hxminiaudio
 		std::lock_guard<std::recursive_mutex> guard(lock);
 		Group* group = findGroup(id);
 		if (group == NULL) return;
-		ma_node* fallback = masterMeterActive ? (ma_node*)&masterMeter : ma_engine_get_endpoint(&engine);
+		ma_node* fallback = rootOutput();
 		for (size_t i = 0; i < sounds.size(); i++)
 		{
 			Sound* sound = sounds[i];
@@ -511,7 +681,15 @@ namespace hxminiaudio
 			else ma_node_attach_output_bus(&sound->sound, 0, fallback, 0);
 			sound->group = -1;
 		}
+		for (size_t i = 0; i < groups.size(); i++)
+		{
+			Group* child = groups[i];
+			if (child == NULL || child == group) continue;
+			ma_node_base* childOutput = child->hasEffects ? (ma_node_base*)&child->effects : (ma_node_base*)&child->group;
+			if (childOutput->pOutputBuses[0].pInputNode == (ma_node*)&group->group) ma_node_attach_output_bus(childOutput, 0, fallback, 0);
+		}
 		ma_sound_group_uninit(&group->group);
+		if (group->hasEffects) uninitEffects(&group->effects);
 		groups[id & INDEX_MASK] = NULL;
 		delete group;
 	}
@@ -649,8 +827,329 @@ namespace hxminiaudio
 		std::lock_guard<std::recursive_mutex> guard(lock);
 		Sound* sound = findSound(id);
 		if (sound == NULL) return;
+		for (size_t i = 0; i < sounds.size(); i++)
+		{
+			Sound* child = sounds[i];
+			if (child == NULL || child->parent != id) continue;
+			sounds[i] = NULL;
+			destroySound(child);
+		}
 		sounds[id & INDEX_MASK] = NULL;
 		destroySound(sound);
+	}
+
+	int soundLoadMemoryDecoded(const unsigned char* data, int size, int group)
+	{
+		if (data == NULL || size <= 0 || !engineInit()) return -1;
+		std::lock_guard<std::recursive_mutex> guard(lock);
+		ma_uint32 rate = ma_engine_get_sample_rate(&engine);
+		ma_decoder_config decoderConfig = ma_decoder_config_init(ma_format_f32, 0, rate);
+		ma_uint64 frames = 0;
+		void* pcm = NULL;
+		if (ma_decode_memory(data, (size_t)size, &decoderConfig, &frames, &pcm) != MA_SUCCESS || pcm == NULL || frames == 0)
+		{
+			if (pcm != NULL) ma_free(pcm, NULL);
+			return -1;
+		}
+		Sound* sound = newSound();
+		sound->pcm = (float*)pcm;
+		sound->pcmFrames = frames;
+		sound->pcmChannels = decoderConfig.channels;
+		if (sound->pcmChannels == 0)
+		{
+			ma_decoder probe;
+			ma_decoder_config probeConfig = ma_decoder_config_init(ma_format_f32, 0, rate);
+			if (ma_decoder_init_memory(data, (size_t)size, &probeConfig, &probe) == MA_SUCCESS)
+			{
+				sound->pcmChannels = probe.outputChannels;
+				ma_decoder_uninit(&probe);
+			}
+		}
+		if (sound->pcmChannels == 0 || ma_audio_buffer_ref_init(ma_format_f32, sound->pcmChannels, sound->pcm, frames, &sound->bufferRef) != MA_SUCCESS)
+		{
+			ma_free(pcm, NULL);
+			delete sound;
+			return -1;
+		}
+		sound->bufferRef.sampleRate = rate;
+		sound->hasBufferRef = true;
+		ma_uint32 flags = MA_SOUND_FLAG_NO_SPATIALIZATION | MA_SOUND_FLAG_NO_DEFAULT_ATTACHMENT;
+		if (ma_sound_init_from_data_source(&engine, &sound->bufferRef, flags, NULL, &sound->sound) != MA_SUCCESS)
+		{
+			ma_audio_buffer_ref_uninit(&sound->bufferRef);
+			ma_free(pcm, NULL);
+			delete sound;
+			return -1;
+		}
+		attachSound(sound, group);
+		int handle = storeSound(sound);
+		if (handle < 0) destroySound(sound);
+		return handle;
+	}
+
+	void soundSetMaxVoices(int id, int voices)
+	{
+		std::lock_guard<std::recursive_mutex> guard(lock);
+		Sound* sound = findSound(id);
+		if (sound != NULL) sound->maxVoices = voices < 1 ? 1 : voices;
+	}
+
+	int soundVoices(int id)
+	{
+		std::lock_guard<std::recursive_mutex> guard(lock);
+		int count = 0;
+		for (size_t i = 0; i < sounds.size(); i++)
+			if (sounds[i] != NULL && sounds[i]->parent == id) count++;
+		return count;
+	}
+
+	int soundPlayOneShot(int id, float volume, float pitch, float pan, int group)
+	{
+		std::lock_guard<std::recursive_mutex> guard(lock);
+		Sound* source = findSound(id);
+		if (source == NULL) return -1;
+
+		int voices = 0;
+		size_t oldestIndex = 0;
+		unsigned long long oldestOrder = ~0ULL;
+		for (size_t i = 0; i < sounds.size(); i++)
+		{
+			Sound* child = sounds[i];
+			if (child == NULL || child->parent != id) continue;
+			voices++;
+			if (child->order < oldestOrder)
+			{
+				oldestOrder = child->order;
+				oldestIndex = i;
+			}
+		}
+		if (voices >= source->maxVoices && oldestOrder != ~0ULL)
+		{
+			Sound* oldest = sounds[oldestIndex];
+			sounds[oldestIndex] = NULL;
+			destroySound(oldest);
+		}
+
+		int targetGroup = group >= 0 ? group : source->group;
+		Sound* sound = newSound();
+		sound->parent = id;
+		sound->autoRelease = true;
+		ma_uint32 flags = MA_SOUND_FLAG_NO_SPATIALIZATION | MA_SOUND_FLAG_NO_DEFAULT_ATTACHMENT;
+
+		if (source->pcm != NULL)
+		{
+			sound->pcm = source->pcm;
+			sound->pcmFrames = source->pcmFrames;
+			sound->pcmChannels = source->pcmChannels;
+			if (ma_audio_buffer_ref_init(ma_format_f32, source->pcmChannels, source->pcm, source->pcmFrames, &sound->bufferRef) != MA_SUCCESS)
+			{
+				delete sound;
+				return -1;
+			}
+			sound->bufferRef.sampleRate = source->bufferRef.sampleRate;
+			sound->hasBufferRef = true;
+			if (ma_sound_init_from_data_source(&engine, &sound->bufferRef, flags, NULL, &sound->sound) != MA_SUCCESS)
+			{
+				ma_audio_buffer_ref_uninit(&sound->bufferRef);
+				delete sound;
+				return -1;
+			}
+		}
+		else if (source->memory != NULL)
+		{
+			ma_decoder_config decoderConfig = ma_decoder_config_init(ma_format_f32, 0, 0);
+			if (ma_decoder_init_memory(source->memory, source->memorySize, &decoderConfig, &sound->decoder) != MA_SUCCESS)
+			{
+				delete sound;
+				return -1;
+			}
+			sound->hasDecoder = true;
+			if (ma_sound_init_from_data_source(&engine, &sound->decoder, flags, NULL, &sound->sound) != MA_SUCCESS)
+			{
+				ma_decoder_uninit(&sound->decoder);
+				delete sound;
+				return -1;
+			}
+		}
+		else if (ma_sound_init_copy(&engine, &source->sound, flags, NULL, &sound->sound) != MA_SUCCESS)
+		{
+			delete sound;
+			return -1;
+		}
+
+		attachSound(sound, targetGroup, false);
+		ma_sound_set_volume(&sound->sound, volume < 0 ? 0 : volume);
+		ma_sound_set_pitch(&sound->sound, pitch > 0 ? pitch : 1.0f);
+		ma_sound_set_pan(&sound->sound, pan);
+		sound->order = ++playOrder;
+		int handle = storeSound(sound);
+		if (handle < 0)
+		{
+			destroySound(sound);
+			return -1;
+		}
+		if (ma_sound_start(&sound->sound) != MA_SUCCESS)
+		{
+			sounds[handle & INDEX_MASK] = NULL;
+			destroySound(sound);
+			return -1;
+		}
+		return handle;
+	}
+
+	void soundStopVoices(int id)
+	{
+		std::lock_guard<std::recursive_mutex> guard(lock);
+		for (size_t i = 0; i < sounds.size(); i++)
+		{
+			Sound* child = sounds[i];
+			if (child == NULL || child->parent != id) continue;
+			sounds[i] = NULL;
+			destroySound(child);
+		}
+	}
+
+	bool effectSetLowPass(int groupId, double cutoff, int order)
+	{
+		std::lock_guard<std::recursive_mutex> guard(lock);
+		EffectNode* effects = findEffects(groupId);
+		if (effects == NULL) return false;
+		bool ok = true;
+		lockEffects(effects);
+		if (cutoff <= 0)
+		{
+			effects->lpfOn = false;
+		}
+		else
+		{
+			double nyquist = effects->sampleRate * 0.5 - 1.0;
+			ma_lpf_config config = ma_lpf_config_init(ma_format_f32, effects->channels, effects->sampleRate, cutoff < nyquist ? cutoff : nyquist, (ma_uint32)(order < 1 ? 2 : (order > 8 ? 8 : order)));
+			if (effects->lpfReady && effects->lpf.lpf1Count + effects->lpf.lpf2Count * 2 == config.order) ok = ma_lpf_reinit(&config, &effects->lpf) == MA_SUCCESS;
+			else
+			{
+				if (effects->lpfReady) ma_lpf_uninit(&effects->lpf, NULL);
+				effects->lpfReady = ma_lpf_init(&config, NULL, &effects->lpf) == MA_SUCCESS;
+				ok = effects->lpfReady;
+			}
+			effects->lpfOn = ok;
+		}
+		unlockEffects(effects);
+		return ok;
+	}
+
+	bool effectSetHighPass(int groupId, double cutoff, int order)
+	{
+		std::lock_guard<std::recursive_mutex> guard(lock);
+		EffectNode* effects = findEffects(groupId);
+		if (effects == NULL) return false;
+		bool ok = true;
+		lockEffects(effects);
+		if (cutoff <= 0)
+		{
+			effects->hpfOn = false;
+		}
+		else
+		{
+			double nyquist = effects->sampleRate * 0.5 - 1.0;
+			ma_hpf_config config = ma_hpf_config_init(ma_format_f32, effects->channels, effects->sampleRate, cutoff < nyquist ? cutoff : nyquist, (ma_uint32)(order < 1 ? 2 : (order > 8 ? 8 : order)));
+			if (effects->hpfReady && effects->hpf.hpf1Count + effects->hpf.hpf2Count * 2 == config.order) ok = ma_hpf_reinit(&config, &effects->hpf) == MA_SUCCESS;
+			else
+			{
+				if (effects->hpfReady) ma_hpf_uninit(&effects->hpf, NULL);
+				effects->hpfReady = ma_hpf_init(&config, NULL, &effects->hpf) == MA_SUCCESS;
+				ok = effects->hpfReady;
+			}
+			effects->hpfOn = ok;
+		}
+		unlockEffects(effects);
+		return ok;
+	}
+
+	bool effectSetEcho(int groupId, double delayMilliseconds, float feedback, float wet)
+	{
+		std::lock_guard<std::recursive_mutex> guard(lock);
+		EffectNode* effects = findEffects(groupId);
+		if (effects == NULL) return false;
+		ma_uint32 frames = delayMilliseconds > 0 ? (ma_uint32)(delayMilliseconds * effects->sampleRate / 1000.0) : 0;
+		if (frames > effects->sampleRate * 4) frames = effects->sampleRate * 4;
+		float* buffer = NULL;
+		if (frames > 0 && frames != effects->echoFrames)
+		{
+			buffer = (float*)calloc((size_t)frames * effects->channels, sizeof(float));
+			if (buffer == NULL) return false;
+		}
+		lockEffects(effects);
+		float* old = NULL;
+		if (frames == 0)
+		{
+			old = effects->echo;
+			effects->echo = NULL;
+			effects->echoFrames = 0;
+		}
+		else if (buffer != NULL)
+		{
+			old = effects->echo;
+			effects->echo = buffer;
+			effects->echoFrames = frames;
+			effects->echoCursor = 0;
+		}
+		effects->echoFeedback = feedback < 0 ? 0 : (feedback > 0.95f ? 0.95f : feedback);
+		effects->echoWet = wet < 0 ? 0 : wet;
+		unlockEffects(effects);
+		if (old != NULL) free(old);
+		return true;
+	}
+
+	void effectSetGain(int groupId, float gain)
+	{
+		std::lock_guard<std::recursive_mutex> guard(lock);
+		EffectNode* effects = findEffects(groupId);
+		if (effects == NULL) return;
+		lockEffects(effects);
+		effects->gain = gain < 0 ? 0 : gain;
+		unlockEffects(effects);
+	}
+
+	void effectClear(int groupId)
+	{
+		effectSetLowPass(groupId, 0, 0);
+		effectSetHighPass(groupId, 0, 0);
+		effectSetEcho(groupId, 0, 0, 0);
+		effectSetGain(groupId, 1.0f);
+	}
+
+	int deviceCount()
+	{
+		std::lock_guard<std::recursive_mutex> guard(lock);
+		if (!contextActive) return 0;
+		ma_device_info* infos = NULL;
+		ma_uint32 count = 0;
+		if (ma_context_get_devices(&context, &infos, &count, NULL, NULL) != MA_SUCCESS) return 0;
+		return (int)count;
+	}
+
+	const char* deviceNameAt(int index)
+	{
+		static char name[256];
+		std::lock_guard<std::recursive_mutex> guard(lock);
+		name[0] = '\0';
+		if (!contextActive) return name;
+		ma_device_info* infos = NULL;
+		ma_uint32 count = 0;
+		if (ma_context_get_devices(&context, &infos, &count, NULL, NULL) != MA_SUCCESS || index < 0 || (ma_uint32)index >= count) return name;
+		strncpy(name, infos[index].name, sizeof(name) - 1);
+		name[sizeof(name) - 1] = '\0';
+		return name;
+	}
+
+	bool deviceIsDefault(int index)
+	{
+		std::lock_guard<std::recursive_mutex> guard(lock);
+		if (!contextActive) return false;
+		ma_device_info* infos = NULL;
+		ma_uint32 count = 0;
+		if (ma_context_get_devices(&context, &infos, &count, NULL, NULL) != MA_SUCCESS || index < 0 || (ma_uint32)index >= count) return false;
+		return infos[index].isDefault != 0;
 	}
 
 	int soundCount()

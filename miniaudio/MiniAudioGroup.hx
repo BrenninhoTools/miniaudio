@@ -7,10 +7,65 @@ class MiniAudioGroup
 	public var volume(get, set):Float;
 	public var pitch(default, set):Float = 1;
 	public var pan(default, set):Float = 0;
+	public var effects(default, null):MiniAudioEffects;
+
+	var fadeFrom:Float = 0;
+	var fadeTo:Float = 0;
+	var fadeStart:Float = -1;
+	var fadeDuration:Float = 0;
+	var fadeDone:Void->Void;
 
 	function new(id:Int)
 	{
 		this.id = id;
+		effects = new MiniAudioEffects(id);
+	}
+
+	public function fade(to:Float, milliseconds:Float, ?onComplete:Void->Void):MiniAudioGroup
+	{
+		if (!valid) return this;
+		if (milliseconds <= 0)
+		{
+			volume = to;
+			fadeStart = -1;
+			if (onComplete != null) onComplete();
+			return this;
+		}
+		fadeFrom = volume;
+		fadeTo = to;
+		fadeDuration = milliseconds;
+		fadeStart = haxe.Timer.stamp() * 1000;
+		fadeDone = onComplete;
+		MiniAudio.track(this);
+		return this;
+	}
+
+	public function duck(volume:Float = 0.3, milliseconds:Float = 150):MiniAudioGroup
+	{
+		return fade(volume, milliseconds);
+	}
+
+	public inline function unduck(milliseconds:Float = 300):MiniAudioGroup
+	{
+		return fade(1, milliseconds);
+	}
+
+	@:allow(miniaudio.MiniAudio)
+	function updateFade(now:Float):Bool
+	{
+		if (fadeStart < 0 || !valid) return false;
+		var t:Float = (now - fadeStart) / fadeDuration;
+		if (t >= 1)
+		{
+			volume = fadeTo;
+			fadeStart = -1;
+			var done:Void->Void = fadeDone;
+			fadeDone = null;
+			if (done != null) done();
+			return false;
+		}
+		volume = fadeFrom + (fadeTo - fadeFrom) * t;
+		return true;
 	}
 
 	public static function create(?parent:MiniAudioGroup):MiniAudioGroup
@@ -44,6 +99,8 @@ class MiniAudioGroup
 
 	public function destroy():Void
 	{
+		fadeStart = -1;
+		fadeDone = null;
 		#if cpp
 		if (valid) MiniAudioNative.groupRelease(id);
 		#end

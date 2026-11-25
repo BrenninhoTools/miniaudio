@@ -17,6 +17,10 @@ class MiniAudio
 	public static var soundCount(get, never):Int;
 	public static var autoSuspend:Bool = true;
 	public static var autoUpdate:Bool = true;
+	public static var masterEffects(default, null):MiniAudioEffects = new MiniAudioEffects(-1);
+
+	static var trackedSounds:Array<MiniAudioSound> = [];
+	static var trackedGroups:Array<MiniAudioGroup> = [];
 
 	static var hooked:Bool = false;
 	static var focusSuspended:Bool = false;
@@ -34,6 +38,8 @@ class MiniAudio
 
 	public static function shutdown():Void
 	{
+		trackedSounds = [];
+		trackedGroups = [];
 		#if cpp
 		MiniAudioNative.engineShutdown();
 		#end
@@ -62,6 +68,45 @@ class MiniAudio
 		#if cpp
 		if (MiniAudioNative.engineReady()) MiniAudioNative.engineUpdate();
 		#end
+		if (trackedGroups.length > 0)
+		{
+			var now:Float = haxe.Timer.stamp() * 1000;
+			var i:Int = trackedGroups.length;
+			while (i-- > 0)
+				if (!trackedGroups[i].updateFade(now)) trackedGroups.splice(i, 1);
+		}
+		if (trackedSounds.length > 0)
+		{
+			var i:Int = trackedSounds.length;
+			while (i-- > 0)
+				if (!trackedSounds[i].checkComplete()) trackedSounds.splice(i, 1);
+		}
+	}
+
+	@:allow(miniaudio.MiniAudioSound)
+	@:allow(miniaudio.MiniAudioGroup)
+	static function track(item:Dynamic):Void
+	{
+		if (Std.isOfType(item, MiniAudioSound))
+		{
+			if (trackedSounds.indexOf(item) < 0) trackedSounds.push(item);
+		}
+		else if (Std.isOfType(item, MiniAudioGroup))
+		{
+			if (trackedGroups.indexOf(item) < 0) trackedGroups.push(item);
+		}
+		hook();
+	}
+
+	public static function devices():Array<{name:String, isDefault:Bool}>
+	{
+		var list:Array<{name:String, isDefault:Bool}> = [];
+		#if cpp
+		if (!ready) return list;
+		for (i in 0...MiniAudioNative.deviceCount())
+			list.push({name: untyped __cpp__('::String::create({0})', MiniAudioNative.deviceNameAt(i)), isDefault: MiniAudioNative.deviceIsDefault(i)});
+		#end
+		return list;
 	}
 
 	public static function sampleRate():Int

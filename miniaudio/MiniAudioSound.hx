@@ -19,6 +19,11 @@ class MiniAudioSound
 	public var sampleRate(get, never):Int;
 	public var channels(get, never):Int;
 	public var group(default, null):MiniAudioGroup;
+	public var voices(get, never):Int;
+	public var maxVoices(default, set):Int = 8;
+	public var onComplete:Void->Void;
+
+	var completeArmed:Bool = false;
 
 	function new(id:Int)
 	{
@@ -45,6 +50,83 @@ class MiniAudioSound
 		#else
 		return null;
 		#end
+	}
+
+	public static function decoded(bytes:Bytes, ?group:MiniAudioGroup):MiniAudioSound
+	{
+		#if cpp
+		if (bytes == null || bytes.length < 1 || !MiniAudio.init()) return null;
+		var id:Int = MiniAudioNative.soundLoadMemoryDecoded(cpp.Pointer.arrayElem(bytes.getData(), 0).constRaw, bytes.length, group != null ? group.id : -1);
+		return wrap(id, group);
+		#else
+		return null;
+		#end
+	}
+
+	public static function decodedAsset(key:String, ?group:MiniAudioGroup):MiniAudioSound
+	{
+		#if sys
+		if (sys.FileSystem.exists(key)) return decoded(sys.io.File.getBytes(key), group);
+		#end
+		#if openfl
+		if (openfl.utils.Assets.exists(key)) return decoded(openfl.utils.Assets.getBytes(key), group);
+		#elseif lime
+		if (lime.utils.Assets.exists(key)) return decoded(lime.utils.Assets.getBytes(key), group);
+		#end
+		return null;
+	}
+
+	public function playOneShot(volume:Float = 1, pitch:Float = 1, pan:Float = 0, ?group:MiniAudioGroup):Bool
+	{
+		#if cpp
+		if (!valid) return false;
+		return MiniAudioNative.soundPlayOneShot(id, volume, pitch, pan, group != null ? group.id : -1) >= 0;
+		#else
+		return false;
+		#end
+	}
+
+	public function stopVoices():Void
+	{
+		#if cpp
+		if (valid) MiniAudioNative.soundStopVoices(id);
+		#end
+	}
+
+	function get_voices():Int
+	{
+		#if cpp
+		return valid ? MiniAudioNative.soundVoices(id) : 0;
+		#else
+		return 0;
+		#end
+	}
+
+	function set_maxVoices(value:Int):Int
+	{
+		maxVoices = value < 1 ? 1 : value;
+		#if cpp
+		if (valid) MiniAudioNative.soundSetMaxVoices(id, maxVoices);
+		#end
+		return maxVoices;
+	}
+
+	@:allow(miniaudio.MiniAudio)
+	function checkComplete():Bool
+	{
+		if (!completeArmed || !valid) return false;
+		if (looping || playing) return true;
+		completeArmed = false;
+		var callback:Void->Void = onComplete;
+		if (callback != null) callback();
+		return false;
+	}
+
+	function armComplete():Void
+	{
+		if (onComplete == null) return;
+		completeArmed = true;
+		MiniAudio.track(this);
 	}
 
 	static function wrap(id:Int, group:MiniAudioGroup):MiniAudioSound
@@ -91,7 +173,7 @@ class MiniAudioSound
 	public function play():MiniAudioSound
 	{
 		#if cpp
-		if (valid) MiniAudioNative.soundPlay(id);
+		if (valid && MiniAudioNative.soundPlay(id)) armComplete();
 		#end
 		return this;
 	}
@@ -99,7 +181,7 @@ class MiniAudioSound
 	public function playDelayed(milliseconds:Float):MiniAudioSound
 	{
 		#if cpp
-		if (valid) MiniAudioNative.soundPlayDelayed(id, milliseconds);
+		if (valid && MiniAudioNative.soundPlayDelayed(id, milliseconds)) armComplete();
 		#end
 		return this;
 	}
@@ -136,6 +218,8 @@ class MiniAudioSound
 
 	public function destroy():Void
 	{
+		completeArmed = false;
+		onComplete = null;
 		#if cpp
 		if (valid) MiniAudioNative.soundRelease(id);
 		#end
